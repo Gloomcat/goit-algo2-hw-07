@@ -1,9 +1,12 @@
 import random
+import time
 
 from collections import OrderedDict
-from functools import partial
-from timeit import timeit
 
+QUERY_TYPES = ("Range", "Update")
+ARRAY_SIZE = 100000
+QUERY_SIZE = 50000
+CACHE_SIZE = 1000
 
 class LRUCache:
     def __init__(self, capacity):
@@ -29,93 +32,126 @@ class LRUCache:
             del self.cache[key]
 
 
-cache = LRUCache(1000)
-
-
 def range_sum_no_cache(array: list[int], L: int, R: int) -> int:
-    return sum(array[L:R+1])
+    return sum(array[L: R + 1])
+
 
 def update_no_cache(array: list[int], index: int, value: int) -> int:
     array[index] = value
     return array[index]
 
-def range_sum_with_cache(array: list[int], L: int, R: int) -> int:
+
+def range_sum_with_cache(
+    array: list[int],
+    L: int,
+    R: int,
+    cache: LRUCache,
+    hits_misses: list[int],
+) -> int:
     result = cache.get((L, R))
     if result:
+        hits_misses[0] += 1
         return result
 
-    result = sum(array[L:R+1])
+    hits_misses[1] += 1
+    result = sum(array[L: R + 1])
     cache.put((L, R), result)
     return result
 
-def update_with_cache(array: list[int], index: int, value: int) -> int:
+
+def update_with_cache(array: list[int], index: int, value: int, cache: LRUCache) -> int:
     array[index] = value
     cache.invalidate_range(index)
     return array[index]
 
-handlers_no_cache = {
-    "Range": range_sum_no_cache,
-    "Update": update_no_cache
-}
 
-handlers_with_cache = {
-    "Range": range_sum_with_cache,
-    "Update": update_with_cache
-}
-
-def executor(array: list[int], operations: list[tuple[str, int, int]], cache: bool) -> None:
-    if cache:
-        range_sum = range_sum_with_cache
-        updater = update_with_cache
-    else:
-        range_sum = range_sum_no_cache
-        updater = update_no_cache
-
-    step = int(len(operations) / 100)
-    for index, operation in enumerate(operations):
-        if index % step == 0:
-            print(f"{"Cache" if cache else "No cache"} progress: {index // step}%")
-        if operation[0] == "Range":
-            range_sum(array, operation[1], operation[2])
+def no_cache_processor(array: list[int], queries: list[tuple[str, int, int]]) -> float:
+    start_time = time.perf_counter()
+    for query in queries:
+        if query[0] == "Range":
+            range_sum_no_cache(array, query[1], query[2])
         else:
-            updater(array, operation[1], operation[2])
+            update_no_cache(array, query[1], query[2])
+    return time.perf_counter() - start_time
+
+
+def cache_processor(
+    array: list[int], queries: list[tuple[str, int, int]]
+) -> tuple[float, int, int]:
+    cache = LRUCache(CACHE_SIZE)
+    hits_misses = [0, 0]
+
+    start_time = time.perf_counter()
+    for query in queries:
+        if query[0] == "Range":
+            range_sum_with_cache(
+                array, query[1], query[2], cache, hits_misses
+            )
+        else:
+            update_with_cache(array, query[1], query[2], cache)
+    return time.perf_counter() - start_time, hits_misses[0], hits_misses[1]
+
+
+def generate_queries(range_duplicates_ratio: float = .0, updates_ratio: float = .5):
+    queries = []
+    for _ in range(QUERY_SIZE):
+        if random.random() < updates_ratio:
+            query_type = "Update"
+        elif len(queries) > 10 and random.random() < range_duplicates_ratio:
+            query = random.choice(queries)
+            while query[0] != "Range":
+                query = random.choice(queries)
+            queries.append(query)
+            continue
+        else:
+            query_type = "Range"
+        first_arg = random.randint(1, ARRAY_SIZE) - 1
+        if query_type == "Range":
+            second_arg = random.randint(
+                first_arg, ARRAY_SIZE - 1)
+        else:
+            second_arg = random.randint(1, ARRAY_SIZE)
+        queries.append((query_type, first_arg, second_arg))
+    return queries
 
 
 if __name__ == "__main__":
-    operation_types = ("Range", "Update")
-    array_size = 100000
-    operation_size = 50000
+    RANGE_DUPLICATES_RATIO = .0
+    UPDATES_RATIO = .5
 
-    array = [random.randint(1, array_size) for _ in range(array_size)]
-    operations = []
-    for _ in range(operation_size):
-        operation_type = random.choice(operation_types)
-        first_arg = random.randint(1, array_size) - 1
-        if operation_type == "Range":
-            second_arg = random.randint(first_arg, array_size - 1)
-        else:
-            second_arg = random.randint(1, array_size)
-        operations.append((operation_type, first_arg, second_arg))
-
-    no_cache_time = timeit(
-        partial(executor, array, operations, False), number=1)
-    with_cache_time = timeit(
-        partial(executor, array, operations, True), number=1)
-
+    queries = generate_queries(RANGE_DUPLICATES_RATIO, UPDATES_RATIO)
+    array = [random.randint(1, ARRAY_SIZE) for _ in range(ARRAY_SIZE)]
+    no_cache_time = no_cache_processor(array, queries)
     print(f"Час виконання без кешування: {no_cache_time} секунд")
-    print(f"Час виконання з LRU-кешем: {with_cache_time} секунд")
+
+    array = [random.randint(1, ARRAY_SIZE) for _ in range(ARRAY_SIZE)]
+    cache_time, cache_hits, cache_misses = cache_processor(
+        array, queries)
+
+    seen_queries = set()
+    repeated = 0
+    range_queries = [query for query in queries if query[0] == "Range"]
+    for op in range_queries:
+        if op[0] == "Range":
+            if (op[1], op[2]) in seen_queries:
+                repeated += 1
+            seen_queries.add((op[1], op[2]))
+
+    print(f"Час виконання з LRU-кешем: {cache_time} секунд")
+    print(
+        f"Повторювані range запити: {repeated} / {len(range_queries)}")
+    print(
+        f"Кеш hits: {cache_hits}, Кеш misses: {cache_misses}, Hit Rate: {cache_hits / (cache_hits + cache_misses):.2f}"
+    )
 
     """
-    Результат:
-    Час виконання майже однаковий в обох випадках. Використання кешу займає дещо більше часу.
+    Висновок:
+    Використання LRU Cache не є доцільним у даному випадку, оскільки кеш не використовується взагалі.
+    Це пов'язано зі складністю ключів та частотою інвалідації внаслідок операцій оновлення.
 
     Спостереження:
-    1. Швидке виконання операції суми.
-    2. Кеш метод get() з ключами типу (L, R) має низьку ймовірність hit-a.
-    3. Інвалідація кешу за діапазоном потребує багатьох перевірок у кеші.
-
-    Висновок:
-    У даному прикладі використання кешу не є доцільним. Кешування буде ефективнішим при
-    виконанні складних операцій з даними, що потребуватимуть більше часу і/або використанні
-    простіших ключів, що збільшить ймовірність hit-a.
+    Ефективність кешу у даній задачі зростає зі зменшенням кількості операцій оновлення
+    (UPDATES_RATIO) та збільшенням однакових Range запитів (RANGE_DUPLICATES_RATIO).
+    Достатні показники (Cache Hit Rate >30%) можливі тільки при вибірці запитів з дуже низьким відсотком
+    оновлень (<1% від загальної кількості операцій) та високим дублюванням Range запитів (>80%).
     """
